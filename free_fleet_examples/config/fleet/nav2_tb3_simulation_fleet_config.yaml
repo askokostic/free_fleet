@@ -70,3 +70,13 @@ plugins:
   hello_world:
     module: "free_fleet_examples.actions.hello_world"
     actions: ["hello_world", "delayed_hello_world"]
+  clean:
+    module: "free_fleet_examples.actions.clean"
+    actions: ["clean"]
+    clean_path:
+      path: [
+        [-0.5228389501571655, 0.6098870635032654, 0.0],
+        [0.597766101360321, 0.49156704545021057, 0.0],
+        [0.5755816102027893, -0.5545448064804077, 0.0],
+        [-0.5238049030303955, -0.5963634848594666, 0.0]
+      ]
