@@ -22,12 +22,14 @@ import time
 
 from free_fleet_adapter.nav1_robot_adapter import Nav1RobotAdapter
 from free_fleet_adapter.nav2_robot_adapter import Nav2RobotAdapter
+from free_fleet_adapter.nav2_route_sync import Nav2RouteSync
 import nudged
 import rclpy
 from rclpy.duration import Duration
 from rclpy.experimental import EventsExecutor
 import rclpy.node
 from rclpy.parameter import Parameter
+from rmf_fleet_msgs.msg import LaneRequest
 import rmf_adapter
 from rmf_adapter import Adapter, Transformation
 import rmf_adapter.easy_full_control as rmf_easy
@@ -118,6 +120,24 @@ def start_fleet_adapter(
         if zenoh_config_path is not None else zenoh.Config()
     zenoh_session = zenoh.open(zenoh_config)
 
+    # Set up route graph sync (RMF lane closures -> Nav2 DynamicEdges)
+    route_sync = Nav2RouteSync(
+        zenoh_session=zenoh_session,
+        node=node,
+    )
+
+    def lane_request_cb(msg: LaneRequest):
+        if msg.fleet_name and msg.fleet_name != fleet_name:
+            return
+        route_sync.sync_lane_closures(
+            open_lanes=list(msg.open_lanes),
+            close_lanes=list(msg.close_lanes),
+        )
+
+    node.create_subscription(
+        LaneRequest, 'lane_closure_requests', lane_request_cb, 10
+    )
+
     # Set up tf2 buffer
     tf_buffer = Buffer()
 
@@ -168,6 +188,7 @@ def start_fleet_adapter(
                 fleet_config,
                 tf_buffer
             )
+            route_sync.add_robot(robot_name)
         elif nav_stack == 1:
             robots[robot_name] = Nav1RobotAdapter(
                 robot_name,
