@@ -129,12 +129,17 @@ def start_fleet_adapter(
     def lane_request_cb(msg: LaneRequest):
         if msg.fleet_name and msg.fleet_name != fleet_name:
             return
+        node.get_logger().info(
+            'Lane closure request received '
+            f'(open={list(msg.open_lanes)}, close={list(msg.close_lanes)})'
+        )
         route_sync.sync_lane_closures(
             open_lanes=list(msg.open_lanes),
             close_lanes=list(msg.close_lanes),
         )
 
-    node.create_subscription(
+    # Keep a strong reference to avoid the subscription being garbage-collected.
+    node._lane_request_sub = node.create_subscription(
         LaneRequest, 'lane_closure_requests', lane_request_cb, 10
     )
 

@@ -1,10 +1,13 @@
 {
   plugins: {
     ros2dds: {
+      domain: 0,
+      ros_automatic_discovery_range: "LOCALHOST",
+      ros_localhost_only: true,
       allow: {
         publishers: [".*/tf", ".*/battery_state"],
         subscribers: [],
-        service_servers: [],
+        service_servers: [".*/route_server/DynamicEdgesScorer/adjust_edges"],
         service_clients: [],
         action_servers: [".*/navigate_to_pose"],
         action_clients: [],
@@ -15,9 +18,17 @@
   // Zenoh related configurations
   mode: "client",
   connect: {
-    endpoints: []
+    endpoints: ["tcp/127.0.0.1:7447"]
   },
   listen: {
     endpoints: []
+  },
+  scouting: {
+    multicast: {
+      enabled: false,
+    },
+    gossip: {
+      enabled: false,
+    },
   },
 }
