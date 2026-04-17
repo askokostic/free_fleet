@@ -116,7 +116,9 @@ class Nav2RouteSync:
                 payload=req.serialize(),
                 timeout=self.service_call_timeout_sec,
             )
+            got_reply = False
             for reply in replies:
+                got_reply = True
                 try:
                     resp = DynamicEdges_Response.deserialize(
                         reply.ok.payload.to_bytes()
@@ -137,6 +139,12 @@ class Nav2RouteSync:
                         f'Failed to parse route sync reply from '
                         f'[{robot_name}]: {e}'
                     )
+            if not got_reply:
+                self.node.get_logger().warn(
+                    f'Route sync to [{robot_name}] returned no reply '
+                    f'(closed={closed_edges}, opened={opened_edges}, '
+                    f'adjust={len(adjust_edges)})'
+                )
         except Exception as e:
             self.node.get_logger().warn(
                 f'Route sync Zenoh call to [{robot_name}] failed: {e}'
