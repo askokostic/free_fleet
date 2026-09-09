@@ -19,11 +19,19 @@ import time
 import unittest
 
 from free_fleet_adapter.nav2_robot_adapter import Nav2RobotAdapter
-from free_fleet_adapter.robot_adapter import ExecutionHandle
 import rclpy
 from tf2_ros import Buffer
 
 import zenoh
+
+
+# Mock Destination class for testing as rmf_easy.Destination doesn't have a public constructor
+class MockDestination:
+
+    def __init__(self, map_name=None, position=None, dock=None):
+        self.map = map_name
+        self.position = position
+        self.dock = dock
 
 
 class TestNav2RobotAdapter(unittest.TestCase):
@@ -50,6 +58,7 @@ class TestNav2RobotAdapter(unittest.TestCase):
                 configuration=None,
                 robot_config_yaml={
                     'initial_map': 'L1',
+                    'service_call_timeout_sec': 1.0,
                 },
                 plugin_config=None,
                 node=self.node,
@@ -73,6 +82,7 @@ class TestNav2RobotAdapter(unittest.TestCase):
             configuration=None,
             robot_config_yaml={
                 'initial_map': 'L1',
+                'service_call_timeout_sec': 1.0,
             },
             plugin_config=None,
             node=self.node,
@@ -93,6 +103,7 @@ class TestNav2RobotAdapter(unittest.TestCase):
             configuration=None,
             robot_config_yaml={
                 'initial_map': 'L1',
+                'service_call_timeout_sec': 1.0,
             },
             plugin_config=None,
             node=self.node,
@@ -105,47 +116,6 @@ class TestNav2RobotAdapter(unittest.TestCase):
         battery_soc = robot_adapter.get_battery_soc()
         assert math.isclose(battery_soc, 1.0)
 
-    def test_idle_robot_navigate_is_done(self):
-        tf_buffer = Buffer()
-
-        robot_adapter = Nav2RobotAdapter(
-            name='nav2_tb3',
-            configuration=None,
-            robot_config_yaml={
-                'initial_map': 'L1',
-            },
-            plugin_config=None,
-            node=self.node,
-            zenoh_session=self.zenoh_session,
-            fleet_handle=None,
-            fleet_config=None,
-            tf_buffer=tf_buffer
-        )
-        robot_adapter.exec_handle = ExecutionHandle(None)
-        assert robot_adapter._is_navigation_done(robot_adapter.exec_handle)
-
-    def test_robot_stop_without_command(self):
-        tf_buffer = Buffer()
-
-        robot_adapter = Nav2RobotAdapter(
-            name='nav2_tb3',
-            configuration=None,
-            robot_config_yaml={
-                'initial_map': 'L1',
-            },
-            plugin_config=None,
-            node=self.node,
-            zenoh_session=self.zenoh_session,
-            fleet_handle=None,
-            fleet_config=None,
-            tf_buffer=tf_buffer
-        )
-        robot_adapter.exec_handle = ExecutionHandle(None)
-        assert robot_adapter.exec_handle.execution is None
-        robot_adapter.stop(None)
-        assert robot_adapter.exec_handle.execution is None
-        assert robot_adapter._is_navigation_done(robot_adapter.exec_handle)
-
     def test_robot_handle_navigate_to_invalid_map(self):
         tf_buffer = Buffer()
 
@@ -154,6 +124,7 @@ class TestNav2RobotAdapter(unittest.TestCase):
             configuration=None,
             robot_config_yaml={
                 'initial_map': 'L1',
+                'service_call_timeout_sec': 1.0,
             },
             plugin_config=None,
             node=self.node,
@@ -164,15 +135,9 @@ class TestNav2RobotAdapter(unittest.TestCase):
         )
 
         prev_replan_count = robot_adapter.replan_counts
-        robot_adapter.exec_handle = ExecutionHandle(None)
-        robot_adapter._handle_navigate_to_pose(
-            'invalid_map',
-            0.0,
-            1.0,
-            2.0,
-            0.0,
-            robot_adapter.exec_handle
-        )
+
+        destination = MockDestination(map_name='invalid_map')
+        robot_adapter.navigate(destination, None)
         assert robot_adapter.replan_counts == prev_replan_count + 1
 
     def test_robot_handle_navigate_to_pose(self):
@@ -183,6 +148,7 @@ class TestNav2RobotAdapter(unittest.TestCase):
             configuration=None,
             robot_config_yaml={
                 'initial_map': 'L1',
+                'service_call_timeout_sec': 1.0,
             },
             plugin_config=None,
             node=self.node,
@@ -191,20 +157,25 @@ class TestNav2RobotAdapter(unittest.TestCase):
             fleet_config=None,
             tf_buffer=tf_buffer
         )
-        robot_adapter.exec_handle = ExecutionHandle(None)
 
-        robot_adapter._handle_navigate_to_pose(
-            'L1',
-            -0.395,
-            -0.606,
-            0.0,
-            0.0,
-            robot_adapter.exec_handle
+        destination = MockDestination(
+            map_name='L1',
+            position=[-0.395, -0.606, 0.0]
         )
-        time.sleep(5)
-        assert robot_adapter._is_navigation_done(robot_adapter.exec_handle)
 
-    def test_robot_stop_navigate(self):
+        robot_adapter.navigate(destination, None)
+
+        is_done = False
+        succeeded = None
+        for _ in range(30):
+            time.sleep(1)
+            is_done, succeeded = robot_adapter.nav_handle.is_done()
+            if is_done:
+                break
+        assert is_done
+        assert succeeded
+
+    def test_robot_stop_navigate_to_pose(self):
         tf_buffer = Buffer()
 
         robot_adapter = Nav2RobotAdapter(
@@ -212,6 +183,7 @@ class TestNav2RobotAdapter(unittest.TestCase):
             configuration=None,
             robot_config_yaml={
                 'initial_map': 'L1',
+                'service_call_timeout_sec': 1.0,
             },
             plugin_config=None,
             node=self.node,
@@ -220,21 +192,27 @@ class TestNav2RobotAdapter(unittest.TestCase):
             fleet_config=None,
             tf_buffer=tf_buffer
         )
-        robot_adapter.exec_handle = ExecutionHandle(None)
 
-        robot_adapter._handle_navigate_to_pose(
-            'L1',
-            1.808,
-            0.503,
-            0.0,
-            0.0,
-            robot_adapter.exec_handle
+        destination = MockDestination(
+            map_name='L1',
+            position=[1.808, 0.503, 0.0]
         )
-        assert not robot_adapter._is_navigation_done(robot_adapter.exec_handle)
+
+        robot_adapter.navigate(destination, None)
+        is_done, succeeded = robot_adapter.nav_handle.is_done()
+        assert not is_done
+        assert succeeded is None
+
         time.sleep(1)
-        robot_adapter._handle_stop_navigation()
+
+        # save nav_handle to check its state after it's stopped
+        nav_handle = robot_adapter.nav_handle
+        robot_adapter.stop(activity=None)
+
         time.sleep(1)
-        assert robot_adapter._is_navigation_done(robot_adapter.exec_handle)
+        is_done, succeeded = nav_handle.is_done()
+        assert is_done
+        assert not succeeded
 
     def test_robot_execute_unknown_action(self):
         tf_buffer = Buffer()
@@ -244,6 +222,7 @@ class TestNav2RobotAdapter(unittest.TestCase):
             configuration=None,
             robot_config_yaml={
                 'initial_map': 'L1',
+                'service_call_timeout_sec': 1.0,
             },
             plugin_config=None,
             node=self.node,

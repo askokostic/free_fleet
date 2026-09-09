@@ -10,7 +10,7 @@
         subscribers: [],
         service_servers: [".*/route_server/DynamicEdgesScorer/adjust_edges"],
         service_clients: [],
-        action_servers: [".*/navigate_to_pose"],
+        action_servers: [".*/navigate_to_pose", ".*/dock_robot"],
         action_clients: [],
       },
       pub_max_frequencies: [".*/battery_state=1"],

@@ -248,9 +248,10 @@ class Nav1MoveBaseHandler:
 
             for goal_status in goal_status_array.status_list:
                 goal_status_stamp = goal_status.goal_id.stamp
+                goal_status_time = (goal_status_stamp.sec, goal_status_stamp.nanosec)
+                last_status_time = (last_status_stamp.sec, last_status_stamp.nanosec)
                 if goal_status.status == goal_status.ACTIVE and \
-                        goal_status_stamp.sec >= last_status_stamp.sec and \
-                        goal_status_stamp.nanosec >= last_status_stamp.nanosec:
+                        goal_status_time >= last_status_time:
                     self._tmp_active_goal_id = goal_status.goal_id.id
 
         move_base_status_sub = self.zenoh_session.declare_subscriber(
