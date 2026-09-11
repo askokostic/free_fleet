@@ -99,6 +99,23 @@ class RobotAction(ABC):
         ...
 
     """
+    This method is called when RMF no longer wants this action, either because
+    the activity was stopped or because RMF took the execution away. The
+    action's goals are still running on the robot at that point, and nothing
+    else knows which goals those are, so this is the only chance to stop them.
+
+    It must not wait for the robot to stop. Requesting the stop is all this
+    does; the action keeps being updated until it reports a terminal state,
+    and reporting that the robot has stopped is update_action's job. Note that
+    a cancellation on an action endpoint is itself a service call, so an
+    implementation that makes one blocks its caller for as long as that call
+    takes.
+    """
+    def stop_action(self):
+        # May be populated in the plugins
+        ...
+
+    """
     This method may be used by the action's implementation to cancel the current
     ongoing task.
     """

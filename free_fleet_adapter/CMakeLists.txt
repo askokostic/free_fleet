@@ -24,6 +24,7 @@ install(DIRECTORY
 if(BUILD_TESTING)
   find_package(ament_cmake_pytest REQUIRED)
   set(_pytest_tests
+    tests/test_action_outcome_reporting.py
     tests/test_copyright.py
     tests/test_flake8.py
     tests/test_nav2_action_codecs.py
