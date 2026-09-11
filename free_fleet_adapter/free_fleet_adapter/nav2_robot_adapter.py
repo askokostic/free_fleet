@@ -64,7 +64,7 @@ class Nav2TfHandler:
         self.robot_frame = robot_frame
         self.map_frame = map_frame
 
-        def _tf_callback(sample: zenoh.Sample):
+        def _tf_callback(sample: zenoh.Sample, static: bool = False):
             try:
                 transform = TFMessage.deserialize(sample.payload.to_bytes())
             except Exception as e:
@@ -72,18 +72,27 @@ class Nav2TfHandler:
                     f'Failed to deserialize TF payload: {type(e)}: {e}'
                 )
                 return None
+            set_transform = (self.tf_buffer.set_transform_static if static
+                             else self.tf_buffer.set_transform)
             for zt in transform.transforms:
                 t = transform_stamped_to_ros2_msg(zt)
                 t.header.frame_id = namespacify(zt.header.frame_id,
                                                 self.robot_name)
                 t.child_frame_id = namespacify(zt.child_frame_id,
                                                self.robot_name)
-                self.tf_buffer.set_transform(
-                    t, f'{self.robot_name}_TfListener')
+                set_transform(t, f'{self.robot_name}_TfListener')
+
+        def _tf_static_callback(sample: zenoh.Sample):
+            _tf_callback(sample, static=True)
 
         self.tf_sub = self.zenoh_session.declare_subscriber(
             namespacify('tf', self.robot_name),
             _tf_callback
+        )
+
+        self.tf_static_sub = self.zenoh_session.declare_subscriber(
+            namespacify('tf_static', self.robot_name),
+            _tf_static_callback
         )
 
     def get_transform(self) -> TransformStamped | None:
