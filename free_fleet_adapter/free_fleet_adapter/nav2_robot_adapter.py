@@ -21,6 +21,7 @@ from free_fleet.convert import transform_stamped_to_ros2_msg
 from free_fleet.ros2_types import (
     SensorMsgs_BatteryState,
     TFMessage,
+    Time,
 )
 from free_fleet.utils import (
     namespacify,
@@ -29,16 +30,23 @@ from free_fleet_adapter.action import (
     RobotActionContext,
     RobotActionState,
 )
+from free_fleet_adapter.nav2_action_codecs import (
+    DOCK_ROBOT_ACTION_NAME,
+    DockRobotCodec,
+    DockRobotGoal,
+    NAVIGATE_TO_POSE_ACTION_NAME,
+    NavigateToPoseCodec,
+    NavigateToPoseGoal,
+)
 from free_fleet_adapter.robot_adapter import (
     ExecutionHandle,
     RobotAdapter
 )
-from free_fleet_adapter.ros2_action_interface import (
-    DockActionInterface,
-    NavigateToPoseActionInterface,
-    NavigationActionInterface,
-    RequestAborted,
-    RequestRejected,
+from free_fleet_adapter.ros2_action_client import (
+    GoalNotAccepted,
+    Ros2ActionClient,
+    Ros2ActionCodec,
+    Ros2GoalState,
 )
 
 from geometry_msgs.msg import TransformStamped
@@ -102,6 +110,21 @@ class Nav2TfHandler:
         return None
 
 
+class NavigationCommand:
+    """Pairs an RMF navigation command with the goal carrying it out."""
+
+    def __init__(self, client: Ros2ActionClient, exec_handle: ExecutionHandle):
+        self.client = client
+        self.exec_handle = exec_handle
+
+    def finish(self):
+        """Report to RMF that the command this goal was carrying is over."""
+        execution = self.exec_handle.execution
+        if execution is not None:
+            execution.finished()
+            self.exec_handle.execution = None
+
+
 class Nav2RobotAdapter(RobotAdapter):
     MAX_REPLAN_COUNTS = 5
     DEFAULT_SERVICE_CALL_TIMEOUT_SEC = 1.0
@@ -129,8 +152,8 @@ class Nav2RobotAdapter(RobotAdapter):
         # tracks active action execution requests
         self.exec_handle: ExecutionHandle | None = None
 
-        # tracks active navigation execution requests
-        self.nav_handle: NavigationActionInterface | None = None
+        # tracks the navigation goal currently carrying an RMF command
+        self.nav_command: NavigationCommand | None = None
 
         self.map_name = self.robot_config_yaml['initial_map']
         default_map_frame = 'map'
@@ -151,8 +174,8 @@ class Nav2RobotAdapter(RobotAdapter):
         # Maps plugin name to action factory
         self.action_factories = {}
 
-        # Maps action type (e.g. 'navigate_to_pose') to the zenoh session subscriber for feedback
-        self.action_feedback_subscribers = {}
+        # Maps a ROS 2 action endpoint name to the client that drives it
+        self.action_clients: dict[str, Ros2ActionClient] = {}
 
         self.tf_handler = Nav2TfHandler(
             self.name,
@@ -253,7 +276,8 @@ class Nav2RobotAdapter(RobotAdapter):
                         action_config,
                         self.get_battery_soc,
                         self.get_map_name,
-                        self.get_pose
+                        self.get_pose,
+                        self.create_ros2_action_client
                     )
                     action_factory = plugin.ActionFactory(action_context)
                     for action in action_factory.actions:
@@ -296,21 +320,40 @@ class Nav2RobotAdapter(RobotAdapter):
                         f'actions associated with this plugin.'
                     )
 
-    def _action_feedback_callback(self, action_string: str, sample: zenoh.Sample):
-        if self.nav_handle is None:
-            return
+    def create_ros2_action_client(
+        self,
+        action_name: str,
+        codec: Ros2ActionCodec
+    ) -> Ros2ActionClient:
+        """
+        Return this robot's client for the action_name endpoint.
 
-        self.nav_handle.feedback(action_string, sample.payload.to_bytes())
+        The adapter needs to know nothing about the action to hand out a client
+        for it: the endpoint name and the wire codecs come from the caller. One
+        client is kept per endpoint and reused across goals, so each endpoint
+        declares its feedback subscription exactly once.
+        """
+        client = self.action_clients.get(action_name)
+        if client is not None:
+            if type(client.codec) is not type(codec):
+                raise ValueError(
+                    f'Endpoint [{action_name}] of robot [{self.name}] is '
+                    f'already driven with codec '
+                    f'[{type(client.codec).__name__}], so it cannot also be '
+                    f'driven with codec [{type(codec).__name__}].'
+                )
+            return client
 
-    def _setup_action_feedback_subscriber(self, action_string):
-        if action_string in self.action_feedback_subscribers:
-            return
-
-        subscriber = self.zenoh_session.declare_subscriber(
-            namespacify(f'{action_string}/_action/feedback', self.name),
-            lambda sample: self._action_feedback_callback(action_string, sample)
+        client = Ros2ActionClient(
+            self.node,
+            self.zenoh_session,
+            self.name,
+            action_name,
+            codec,
+            self.service_call_timeout_sec
         )
-        self.action_feedback_subscribers[action_string] = subscriber
+        self.action_clients[action_name] = client
+        return client
 
     def get_battery_soc(self) -> float:
         return self.battery_soc
@@ -364,32 +407,12 @@ class Nav2RobotAdapter(RobotAdapter):
 
         activity_identifier = None
         exec_handle = self.exec_handle
-        nav_handle = self.nav_handle
+        nav_command = self.nav_command
 
-        if nav_handle:
+        if nav_command:
             # Handle navigation requests
-            try:
-                is_done, succeeded = nav_handle.update(state)
-                if is_done:
-                    self.nav_handle = None
-                    self.replan_counts = 0
-                    if succeeded:
-                        if self.nav_issue_ticket is not None:
-                            msg = {}
-                            self.nav_issue_ticket.resolve(msg)
-                            self.nav_issue_ticket = None
-                            self.node.get_logger().info(
-                                'Navigation issue ticket has been resolved'
-                            )
-            except RequestAborted as e:
-                self.nav_issue_ticket = self.create_nav_issue_ticket(
-                    'navigation',
-                    str(e),
-                    nav_handle.get_goal_id()
-                )
-                self._trigger_replan()
-
-            activity_identifier = nav_handle.get_activity()
+            self._report_navigation_outcome(nav_command)
+            activity_identifier = nav_command.exec_handle.activity
 
         elif exec_handle:
             # Handle custom actions
@@ -410,6 +433,72 @@ class Nav2RobotAdapter(RobotAdapter):
             activity_identifier = exec_handle.activity
 
         self.update_handle.update(state, activity_identifier)
+
+    def _report_navigation_outcome(self, nav_command):
+        """
+        Tell RMF what became of the navigation goal this command is carrying.
+
+        The client reports the goal. Deciding what that means for RMF, be it
+        ending the command, raising an issue ticket or replanning, is the
+        adapter's job, and stays here whatever action is being driven.
+
+        A client is shared by every goal sent to its endpoint, so what it
+        reports is only this command's business while the two still name the
+        same goal. Until the goal has been sent, and once the client has moved
+        on to another one, there is nothing here to report.
+        """
+        goal_id = nav_command.exec_handle.goal_id
+        if goal_id is None:
+            return
+
+        outcome = nav_command.client.outcome()
+        if outcome.goal_id != goal_id:
+            return
+
+        match outcome.state:
+            case Ros2GoalState.EXECUTING:
+                return
+
+            case Ros2GoalState.UNDECODABLE:
+                # The goal is still running; only our reading of it failed
+                self.node.get_logger().warn(
+                    f'Robot [{self.name}] could not read the outcome of its '
+                    f'navigation goal: {outcome.detail}'
+                )
+                return
+
+            case Ros2GoalState.ABORTED:
+                self.nav_command = None
+                self.nav_issue_ticket = self.create_nav_issue_ticket(
+                    'navigation',
+                    outcome.detail,
+                    outcome.goal_id
+                )
+                self._trigger_replan()
+
+            case Ros2GoalState.SUCCEEDED:
+                self.nav_command = None
+                self.replan_counts = 0
+                nav_command.finish()
+                if self.nav_issue_ticket is not None:
+                    self.nav_issue_ticket.resolve({})
+                    self.nav_issue_ticket = None
+                    self.node.get_logger().info(
+                        'Navigation issue ticket has been resolved'
+                    )
+
+            case Ros2GoalState.CANCELED:
+                self.nav_command = None
+                self.replan_counts = 0
+                nav_command.finish()
+
+            case _:
+                # No goal is running under this ID, so there is nothing this
+                # command can be told about it
+                self.node.get_logger().warn(
+                    f'Robot [{self.name}] has no navigation goal '
+                    f'{outcome.goal_id} to report on'
+                )
 
     def navigate(
         self,
@@ -433,49 +522,55 @@ class Nav2RobotAdapter(RobotAdapter):
                 f'on map [{destination.map}]'
             )
 
-            self.nav_handle = DockActionInterface(
-                self.name, self.node, self.update_handle, self.zenoh_session,
-                ExecutionHandle(execution),
-                self.service_call_timeout_sec,
-                destination.dock,
-            )
+            client = self.create_ros2_action_client(
+                DOCK_ROBOT_ACTION_NAME, DockRobotCodec())
+            goal = DockRobotGoal(dock_id=destination.dock)
         else:
             self.node.get_logger().info(
                 f'Commanding [{self.name}] to navigate to {destination.position} '
                 f'on map [{destination.map}]'
             )
 
-            self.nav_handle = NavigateToPoseActionInterface(
-                self.name, self.node, self.update_handle, self.zenoh_session,
-                ExecutionHandle(execution),
-                self.service_call_timeout_sec,
-                self.map_frame,
-                destination.position[0],
-                destination.position[1],
-                0.0,
-                destination.position[2],
+            time_now = self.node.get_clock().now().seconds_nanoseconds()
+            client = self.create_ros2_action_client(
+                NAVIGATE_TO_POSE_ACTION_NAME, NavigateToPoseCodec())
+            goal = NavigateToPoseGoal(
+                frame_id=self.map_frame,
+                x=destination.position[0],
+                y=destination.position[1],
+                z=0.0,
+                yaw=destination.position[2],
+                stamp=Time(sec=time_now[0], nanosec=time_now[1])
             )
 
-        action_name = self.nav_handle.get_action_name()
+        nav_command = NavigationCommand(client, ExecutionHandle(execution))
+        self.nav_command = nav_command
 
         try:
-            self.nav_handle.execute()
-            self._setup_action_feedback_subscriber(action_name)
-        except RequestRejected:
+            nav_command.exec_handle.set_goal_id(client.start(goal))
+        except GoalNotAccepted as e:
+            self.node.get_logger().error(
+                f'Robot [{self.name}] could not start its navigation goal: {e}'
+            )
+            self.nav_command = None
+            # The goal never took command, so its mutex is still held here;
+            # cancel without it, in case the robot is driving the goal anyway
+            client.cancel()
             self._trigger_replan()
 
     def _request_nav_stop(self):
-        nav_handle = self.nav_handle
-        if nav_handle:
-            nav_handle.stop()
-            self.nav_handle = None
+        nav_command = self.nav_command
+        if nav_command:
+            self.nav_command = None
+            with nav_command.exec_handle.mutex:
+                nav_command.client.cancel()
 
     def stop(self, activity: ActivityIdentifier):
         if self.exec_handle is not None:
             # TODO: stop the ongoing custom activity
             self.exec_handle = None
 
-        elif self.nav_handle is not None:
+        elif self.nav_command is not None:
             self._request_nav_stop()
 
     def execute_action(
