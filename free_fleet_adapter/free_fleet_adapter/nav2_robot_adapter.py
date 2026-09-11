@@ -417,22 +417,44 @@ class Nav2RobotAdapter(RobotAdapter):
         elif exec_handle:
             # Handle custom actions
             if exec_handle.execution and exec_handle.action:
-                current_action_state = exec_handle.action.update_action()
-                match current_action_state:
-                    case RobotActionState.CANCELED | \
-                            RobotActionState.COMPLETED | \
-                            RobotActionState.FAILED:
-                        self.node.get_logger().info(
-                            f'Robot [{self.name}] current action '
-                            f'[{current_action_state}]'
-                        )
-                        exec_handle.execution.finished()
-                        exec_handle.action = None
-                        self.exec_handle = None
+                self._report_action_outcome(exec_handle)
             # Commands are still being carried out
             activity_identifier = exec_handle.activity
 
         self.update_handle.update(state, activity_identifier)
+
+    def _report_action_outcome(self, exec_handle):
+        """
+        Carry the running action forward, and tell RMF what became of it.
+
+        An execution RMF has withdrawn is no longer the action's to finish:
+        RMF has already given the event its own terminal status, and finishing
+        it here would stamp Completed over that. The action is told instead,
+        and keeps being updated until it reports that the robot has stopped.
+        """
+        if not exec_handle.execution.okay():
+            self._request_action_stop(exec_handle)
+
+        current_action_state = exec_handle.action.update_action()
+        match current_action_state:
+            case RobotActionState.CANCELED | \
+                    RobotActionState.COMPLETED | \
+                    RobotActionState.FAILED:
+                self.node.get_logger().info(
+                    f'Robot [{self.name}] current action '
+                    f'[{current_action_state}]'
+                )
+                if current_action_state is not RobotActionState.CANCELED:
+                    exec_handle.execution.finished()
+                exec_handle.action = None
+                self.exec_handle = None
+
+    def _request_action_stop(self, exec_handle):
+        """Tell the running action, once, that RMF has given up on it."""
+        if exec_handle.stop_requested or exec_handle.action is None:
+            return
+        exec_handle.stop_requested = True
+        exec_handle.action.stop_action()
 
     def _report_navigation_outcome(self, nav_command):
         """
@@ -566,9 +588,12 @@ class Nav2RobotAdapter(RobotAdapter):
                 nav_command.client.cancel()
 
     def stop(self, activity: ActivityIdentifier):
-        if self.exec_handle is not None:
-            # TODO: stop the ongoing custom activity
-            self.exec_handle = None
+        exec_handle = self.exec_handle
+        if exec_handle is not None and exec_handle.action is not None:
+            # The action keeps the robot until it reports that it has stopped.
+            # Dropping it here would leave the goal it sent running, with
+            # nobody left who knows which goal that is.
+            self._request_action_stop(exec_handle)
 
         elif self.nav_command is not None:
             self._request_nav_stop()
@@ -588,6 +613,9 @@ class Nav2RobotAdapter(RobotAdapter):
                 'with another action. Ending current action and accepting '
                 f'incoming action [{category}]'
             )
+            # Told, not only dropped: its goal is still driving the robot the
+            # incoming action is about to command
+            self._request_action_stop(current_exec_handle)
             if current_exec_handle.execution is not None:
                 current_exec_handle.execution.finished()
             current_exec_handle.action = None
