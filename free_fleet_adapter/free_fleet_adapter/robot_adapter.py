@@ -31,8 +31,6 @@ class ExecutionHandle:
         self.execution = execution
         self.goal_id = None
         self.action = None
-        # Whether the action has already been told that RMF gave up on it
-        self.stop_requested = False
         self.mutex = Lock()
         self.mutex.acquire(blocking=True)
 
