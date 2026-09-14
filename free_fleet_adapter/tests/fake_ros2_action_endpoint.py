@@ -207,7 +207,12 @@ class FakeCodec(Ros2ActionCodec):
 
     def decode_get_result_response(self, payload):
         fields = json.loads(payload)
-        return FakeMessage({'status': int(fields['status'])})
+        return FakeMessage({
+            'status': int(fields['status']),
+            # Actions that answer with more than a status - a planner's path,
+            # say - put it here, and the client hands it back untouched
+            'plan': fields.get('plan'),
+        })
 
     def decode_feedback(self, payload):
         fields = json.loads(payload)
@@ -226,8 +231,8 @@ def send_goal_response(accepted: bool) -> bytes:
     return json.dumps({'accepted': accepted}).encode()
 
 
-def get_result_response(status: int) -> bytes:
-    return json.dumps({'status': status}).encode()
+def get_result_response(status: int, plan=None) -> bytes:
+    return json.dumps({'status': status, 'plan': plan}).encode()
 
 
 def feedback_frame(goal_id, remaining_sec: int = 0) -> bytes:

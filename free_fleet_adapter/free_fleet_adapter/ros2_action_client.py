@@ -137,10 +137,21 @@ class Ros2ActionFeedback:
 class Ros2GoalOutcome:
     """What the client knows about a goal, without asking the network."""
 
-    def __init__(self, state: Ros2GoalState, goal_id=None, detail=None):
+    def __init__(
+        self,
+        state: Ros2GoalState,
+        goal_id=None,
+        detail=None,
+        result=None,
+    ):
         self.state = state
         self.goal_id = goal_id
         self.detail = detail
+        # The decoded get_result response, for actions that answer with more
+        # than a status: a planner returns the plan there, and the caller has
+        # no other way to read it. It is None until a result decodes, and it
+        # belongs to goal_id like every other field here.
+        self.result = result
 
     @property
     def is_done(self) -> bool:
@@ -180,6 +191,7 @@ class Ros2ActionClient:
         self._goal_id = None
         self._state = Ros2GoalState.IDLE
         self._detail = None
+        self._result = None
         self._feedback: Ros2ActionFeedback | None = None
         # Goal ID of the result query currently on the wire, if any
         self._result_query_goal_id = None
@@ -220,6 +232,7 @@ class Ros2ActionClient:
             self._goal_id = goal_id
             self._state = Ros2GoalState.EXECUTING
             self._detail = None
+            self._result = None
             self._feedback = None
             self._result_query_goal_id = None
 
@@ -273,7 +286,7 @@ class Ros2ActionClient:
         goal_id = None
         with self._mutex:
             outcome = Ros2GoalOutcome(
-                self._state, self._goal_id, self._detail)
+                self._state, self._goal_id, self._detail, self._result)
             query_due = (
                 self._goal_id is not None and
                 self._state not in TERMINAL_GOAL_STATES and
@@ -350,6 +363,7 @@ class Ros2ActionClient:
             self._goal_id = None
             self._state = Ros2GoalState.IDLE
             self._detail = None
+            self._result = None
             self._feedback = None
             self._result_query_goal_id = None
 
@@ -404,15 +418,22 @@ class Ros2ActionClient:
                 f'{self.action_name} goal {goal_id} ended with result status '
                 f'[{response.status}]'
             )
-        self._set_state(goal_id, state, detail)
+        self._set_state(goal_id, state, detail, response)
 
-    def _set_state(self, goal_id, state: Ros2GoalState, detail=None):
+    def _set_state(
+        self,
+        goal_id,
+        state: Ros2GoalState,
+        detail=None,
+        result=None,
+    ):
         """Record a state, unless it belongs to a goal that has been replaced."""
         with self._mutex:
             if self._goal_id != goal_id:
                 return
             self._state = state
             self._detail = detail
+            self._result = result
 
     def _receive_feedback(self, sample: zenoh.Sample):
         try:

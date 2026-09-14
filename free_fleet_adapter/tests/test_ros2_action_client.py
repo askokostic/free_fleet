@@ -409,5 +409,55 @@ class TestCancelling(unittest.TestCase):
         assert outcome.goal_id == goal_id
 
 
+class TestWhatTheResultCarried(unittest.TestCase):
+    """
+    Some actions answer with more than a status, and the caller needs it.
+
+    A planner's whole answer is its result, and the client is the only thing
+    that ever sees one, so the decoded result travels on the outcome beside the
+    state - and, like everything else there, it belongs to a named goal.
+    """
+
+    def test_a_result_is_handed_back_to_whoever_is_watching_the_goal(self):
+        session = accepting_session()
+        client, _ = start_goal(session)
+        client.outcome()
+
+        session.answer_pending(GET_RESULT, [FakeReply(
+            ok=get_result_response(
+                GoalStatus.STATUS_SUCCEEDED.value, plan=[1, 2, 3]))])
+
+        assert client.outcome().result.plan == [1, 2, 3]
+
+    def test_a_goal_that_has_not_answered_yet_carries_no_result(self):
+        session = accepting_session()
+        client, _ = start_goal(session)
+
+        assert client.outcome().result is None
+
+    def test_a_result_that_did_not_decode_is_no_result_at_all(self):
+        session = accepting_session()
+        client, _ = start_goal(session)
+        client.outcome()
+
+        session.answer_pending(GET_RESULT, [FakeReply(ok=b'garbage')])
+
+        outcome = client.outcome()
+        assert outcome.state == Ros2GoalState.UNDECODABLE
+        assert outcome.result is None
+
+    def test_a_new_goal_does_not_inherit_the_last_ones_result(self):
+        session = accepting_session()
+        client, _ = start_goal(session)
+        client.outcome()
+        session.answer_pending(GET_RESULT, [FakeReply(
+            ok=get_result_response(
+                GoalStatus.STATUS_SUCCEEDED.value, plan=[1, 2, 3]))])
+
+        client.start({'field': 'south'})
+
+        assert client.outcome().result is None
+
+
 if __name__ == '__main__':
     unittest.main()
