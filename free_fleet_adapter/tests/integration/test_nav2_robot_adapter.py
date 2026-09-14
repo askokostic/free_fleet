@@ -172,7 +172,7 @@ class TestNav2RobotAdapter(unittest.TestCase):
 
         robot_adapter.navigate(destination, None)
 
-        client = robot_adapter.nav_command.client
+        client = robot_adapter.claim.client
         outcome = client.outcome()
         for _ in range(30):
             time.sleep(1)
@@ -264,13 +264,13 @@ class TestNav2RobotAdapter(unittest.TestCase):
         )
 
         robot_adapter.navigate(destination, None)
-        outcome = robot_adapter.nav_command.client.outcome()
+        outcome = robot_adapter.claim.client.outcome()
         assert not outcome.is_done
 
         time.sleep(1)
 
         # save the client to check its goal's outcome after it's stopped
-        client = robot_adapter.nav_command.client
+        client = robot_adapter.claim.client
         robot_adapter.stop(activity=None)
 
         outcome = client.outcome()

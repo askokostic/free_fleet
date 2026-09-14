@@ -29,6 +29,7 @@ if(BUILD_TESTING)
     tests/test_flake8.py
     tests/test_nav2_action_codecs.py
     tests/test_navigation_outcome_reporting.py
+    tests/test_one_commander.py
     tests/test_pep257.py
     tests/test_robot_action_context.py
     tests/test_ros2_action_client.py
