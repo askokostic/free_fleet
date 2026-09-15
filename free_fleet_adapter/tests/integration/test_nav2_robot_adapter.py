@@ -18,7 +18,14 @@ import math
 import time
 import unittest
 
+from free_fleet_adapter.nav2_action_codecs import (
+    DOCK_ROBOT_ACTION_NAME,
+    DockRobotCodec,
+    NAVIGATE_TO_POSE_ACTION_NAME,
+    NavigateToPoseCodec,
+)
 from free_fleet_adapter.nav2_robot_adapter import Nav2RobotAdapter
+from free_fleet_adapter.ros2_action_client import Ros2GoalState
 import rclpy
 from tf2_ros import Buffer
 
@@ -165,15 +172,73 @@ class TestNav2RobotAdapter(unittest.TestCase):
 
         robot_adapter.navigate(destination, None)
 
-        is_done = False
-        succeeded = None
+        client = robot_adapter.claim.client
+        outcome = client.outcome()
         for _ in range(30):
             time.sleep(1)
-            is_done, succeeded = robot_adapter.nav_handle.is_done()
-            if is_done:
+            outcome = client.outcome()
+            if outcome.is_done:
                 break
-        assert is_done
-        assert succeeded
+        assert outcome.state == Ros2GoalState.SUCCEEDED
+
+    def test_robot_handle_navigate_to_dock(self):
+        tf_buffer = Buffer()
+
+        robot_adapter = Nav2RobotAdapter(
+            name='nav2_tb3',
+            configuration=None,
+            robot_config_yaml={
+                'initial_map': 'L1',
+                'service_call_timeout_sec': 1.0,
+            },
+            plugin_config=None,
+            node=self.node,
+            zenoh_session=self.zenoh_session,
+            fleet_handle=None,
+            fleet_config=None,
+            tf_buffer=tf_buffer
+        )
+
+        destination = MockDestination(map_name='L1', dock='dock')
+        robot_adapter.navigate(destination, None)
+
+        # Docking is driven through the same client as navigation, against its
+        # own endpoint and its own codec
+        dock_client = robot_adapter.action_clients[DOCK_ROBOT_ACTION_NAME]
+        assert isinstance(dock_client.codec, DockRobotCodec)
+        assert dock_client.action_name == DOCK_ROBOT_ACTION_NAME
+        assert NAVIGATE_TO_POSE_ACTION_NAME not in robot_adapter.action_clients
+
+    def test_robot_reuses_one_client_per_endpoint(self):
+        tf_buffer = Buffer()
+
+        robot_adapter = Nav2RobotAdapter(
+            name='nav2_tb3',
+            configuration=None,
+            robot_config_yaml={
+                'initial_map': 'L1',
+                'service_call_timeout_sec': 1.0,
+            },
+            plugin_config=None,
+            node=self.node,
+            zenoh_session=self.zenoh_session,
+            fleet_handle=None,
+            fleet_config=None,
+            tf_buffer=tf_buffer
+        )
+
+        destination = MockDestination(
+            map_name='L1',
+            position=[-0.395, -0.606, 0.0]
+        )
+        robot_adapter.navigate(destination, None)
+        first = robot_adapter.action_clients[NAVIGATE_TO_POSE_ACTION_NAME]
+
+        robot_adapter.navigate(destination, None)
+        second = robot_adapter.action_clients[NAVIGATE_TO_POSE_ACTION_NAME]
+
+        assert first is second
+        assert isinstance(first.codec, NavigateToPoseCodec)
 
     def test_robot_stop_navigate_to_pose(self):
         tf_buffer = Buffer()
@@ -199,20 +264,22 @@ class TestNav2RobotAdapter(unittest.TestCase):
         )
 
         robot_adapter.navigate(destination, None)
-        is_done, succeeded = robot_adapter.nav_handle.is_done()
-        assert not is_done
-        assert succeeded is None
+        outcome = robot_adapter.claim.client.outcome()
+        assert not outcome.is_done
 
         time.sleep(1)
 
-        # save nav_handle to check its state after it's stopped
-        nav_handle = robot_adapter.nav_handle
+        # save the client to check its goal's outcome after it's stopped
+        client = robot_adapter.claim.client
         robot_adapter.stop(activity=None)
 
-        time.sleep(1)
-        is_done, succeeded = nav_handle.is_done()
-        assert is_done
-        assert not succeeded
+        outcome = client.outcome()
+        for _ in range(10):
+            time.sleep(1)
+            outcome = client.outcome()
+            if outcome.is_done:
+                break
+        assert outcome.state == Ros2GoalState.CANCELED
 
     def test_robot_execute_unknown_action(self):
         tf_buffer = Buffer()

@@ -9,7 +9,8 @@ ament_python_install_package(${PROJECT_NAME})
 install(PROGRAMS
   ${PROJECT_NAME}/fleet_adapter.py
   ${PROJECT_NAME}/nav1_robot_adapter.py
-  ${PROJECT_NAME}/ros2_action_interface.py
+  ${PROJECT_NAME}/ros2_action_client.py
+  ${PROJECT_NAME}/nav2_action_codecs.py
   ${PROJECT_NAME}/nav2_robot_adapter.py
   ${PROJECT_NAME}/robot_adapter.py
   DESTINATION lib/${PROJECT_NAME}
@@ -23,9 +24,15 @@ install(DIRECTORY
 if(BUILD_TESTING)
   find_package(ament_cmake_pytest REQUIRED)
   set(_pytest_tests
+    tests/test_action_outcome_reporting.py
     tests/test_copyright.py
     tests/test_flake8.py
+    tests/test_nav2_action_codecs.py
+    tests/test_navigation_outcome_reporting.py
+    tests/test_one_commander.py
     tests/test_pep257.py
+    tests/test_robot_action_context.py
+    tests/test_ros2_action_client.py
   )
   foreach(_test_path ${_pytest_tests})
     get_filename_component(_test_name ${_test_path} NAME_WE)
@@ -40,7 +47,7 @@ if(BUILD_TESTING)
     set(_pytest_tests
       tests/integration/test_nav2_tf_handler.py
       tests/integration/test_nav2_robot_adapter.py
-      tests/integration/test_ros2_action_interface.py
+      tests/integration/test_nav2_action_client.py
     )
     foreach(_test_path ${_pytest_tests})
       get_filename_component(_test_name ${_test_path} NAME_WE)
