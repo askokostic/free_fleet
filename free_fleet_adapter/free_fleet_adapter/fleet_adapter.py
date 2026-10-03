@@ -133,6 +133,11 @@ def start_fleet_adapter(
             'Lane closure request received '
             f'(open={list(msg.open_lanes)}, close={list(msg.close_lanes)})'
         )
+        # Close first, then open, as Nav2RouteSync and the route_server do.
+        # Thus RMF and the robot agree if a lane is in both lists.
+        # RMF ignores lanes that do not change state.
+        fleet_handle.more().close_lanes(list(msg.close_lanes))
+        fleet_handle.more().open_lanes(list(msg.open_lanes))
         route_sync.sync_lane_closures(
             open_lanes=list(msg.open_lanes),
             close_lanes=list(msg.close_lanes),
