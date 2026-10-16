@@ -101,15 +101,17 @@ class TestReportingAnOutcome(unittest.TestCase):
         assert adapter.claim is None
         assert adapter.replan_counts == 0
 
-    def test_a_canceled_goal_ends_the_command(self):
+    def test_a_goal_another_node_canceled_replans(self):
+        # The adapter did not ask for the cancel, so the robot did not arrive
         adapter = make_adapter()
         claim, client, execution = give_the_robot_a_navigation(
             adapter, Ros2GoalState.CANCELED)
 
         adapter._report_navigation_outcome(claim)
 
-        assert execution.finish_count == 1
+        assert execution.finish_count == 0
         assert adapter.claim is None
+        assert adapter.update_handle.more().replan_count == 1
 
     def test_an_aborted_goal_raises_an_issue_and_replans(self):
         adapter = make_adapter()

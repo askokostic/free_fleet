@@ -598,9 +598,15 @@ class Nav2RobotAdapter(RobotAdapter):
                     )
 
             case Ros2GoalState.CANCELED:
+                # The adapter did not ask for this cancel, so another node
+                # canceled the goal and the robot did not arrive. RMF plans
+                # the command again, as after an abort.
                 self._release_claim(claim)
-                self.replan_counts = 0
-                claim.finish()
+                self.node.get_logger().warn(
+                    f'Robot [{self.name}]: another node canceled navigation '
+                    f'goal {outcome.goal_id}'
+                )
+                self._trigger_replan()
 
             case _:
                 # No goal is running under this ID, so there is nothing this
