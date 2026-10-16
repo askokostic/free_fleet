@@ -255,3 +255,16 @@ class SensorMsgs_BatteryState(IdlStruct):
 class StdMsgs_Empty(IdlStruct):
     # rosidl adds this member to an empty message
     structure_needs_at_least_one_member: pycdr2.types.uint8 = 0
+
+
+# https://github.com/ros2/common_interfaces/blob/rolling/std_srvs/srv/SetBool.srv
+@dataclass
+class StdSrvs_SetBool_Request(IdlStruct):
+    data: bool
+
+
+# https://github.com/ros2/common_interfaces/blob/rolling/std_srvs/srv/SetBool.srv
+@dataclass
+class StdSrvs_SetBool_Response(IdlStruct):
+    success: bool
+    message: str

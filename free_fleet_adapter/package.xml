@@ -19,6 +19,7 @@
   <exec_depend>rmf_fleet_adapter_python</exec_depend>
   <exec_depend>rmf_fleet_msgs</exec_depend>
   <exec_depend>rmf_task_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
   <exec_depend>tf2_ros</exec_depend>
   <exec_depend>tf_transformations</exec_depend>
 

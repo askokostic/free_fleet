@@ -21,7 +21,7 @@ Nav2RobotAdapter.__init__ waits for a live robot to localize, so make_adapter
 builds the adapter without one and populates only the fields these paths read.
 """
 
-from threading import RLock
+from threading import Lock, RLock
 
 from free_fleet_adapter.action import RobotActionState
 from free_fleet_adapter.nav2_robot_adapter import (
@@ -35,7 +35,7 @@ from free_fleet_adapter.ros2_action_client import (
     Ros2GoalState,
 )
 
-from tests.fake_ros2_action_endpoint import FakeNode
+from tests.fake_ros2_action_endpoint import FakeNode, FakeZenohSession
 
 GOAL_ID = list(range(16))
 OTHER_GOAL_ID = list(range(16, 32))
@@ -95,12 +95,15 @@ class FakeActionClient:
         self.scripted = Ros2GoalOutcome(state, goal_id, detail)
         self.cancels = 0
         self.started = []
+        # What the endpoint answers to a cancel: the goal was already over
+        self.goal_was_over = False
 
     def outcome(self):
         return self.scripted
 
     def cancel(self):
         self.cancels += 1
+        return self.goal_was_over
 
     def start(self, goal):
         self.started.append(goal)
@@ -155,7 +158,7 @@ class FakeUpdateHandle:
         self.reported.append(activity_identifier)
 
 
-def make_adapter(stop_timeout_sec=10.0):
+def make_adapter(stop_timeout_sec=10.0, use_evacuation_monitor=False):
     adapter = Nav2RobotAdapter.__new__(Nav2RobotAdapter)
     adapter.name = 'robogreen'
     adapter.node = FakeNode()
@@ -167,8 +170,26 @@ def make_adapter(stop_timeout_sec=10.0):
     adapter.stop_timeout_issues = []
     adapter.action_to_plugin_name = {}
     adapter.action_factories = {}
+    adapter.action_clients = {}
     adapter.nav_issue_ticket = None
     adapter.replan_counts = 0
+    adapter.zenoh_session = FakeZenohSession()
+    adapter.service_call_timeout_sec = 1.0
+    adapter.use_evacuation_monitor = use_evacuation_monitor
+    adapter.gate_mutex = Lock()
+    adapter.evacuation_status = None
+    adapter.evacuation_status_sec = None
+    adapter.evacuation_monitor_had_data = False
+    adapter.start_sec = adapter.node.clock.time_sec
+    adapter.cancel_window_end_sec = None
+    adapter.remote_hold = False
+    adapter.gate_closed = False
+    adapter.no_status_issue = None
+    adapter.monitor_issue = None
+    adapter.monitor_issue_state = None
+    adapter.replan_on_gate_open = False
+    # One clock for the stop wait and for the evacuation gate
+    adapter._monotonic_sec = lambda: adapter.node.clock.time_sec
     adapter.map_name = 'L1'
     adapter.map_frame = 'map'
     adapter.nav_client = FakeActionClient(Ros2GoalState.EXECUTING)

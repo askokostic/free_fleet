@@ -26,6 +26,8 @@ if(BUILD_TESTING)
   set(_pytest_tests
     tests/test_action_outcome_reporting.py
     tests/test_copyright.py
+    tests/test_evacuation_gate.py
+    tests/test_evacuation_status_codec.py
     tests/test_flake8.py
     tests/test_heartbeat.py
     tests/test_nav2_action_codecs.py

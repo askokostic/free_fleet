@@ -20,6 +20,7 @@ import unittest
 
 from free_fleet.ros2_types import (
     ActionMsgs_CancelGoal_Request,
+    ActionMsgs_CancelGoal_Response,
     GoalStatus,
 )
 
@@ -193,6 +194,29 @@ class TestStartingAGoal(unittest.TestCase):
         assert client.goal_id is not None
         client.cancel()
         assert session.queries_for(CANCEL_GOAL)
+
+
+class TestTheGate(unittest.TestCase):
+
+    def test_a_closed_gate_sends_no_goal_and_records_none(self):
+        session = accepting_session()
+        client = Ros2ActionClient(
+            FakeNode(), session, 'robogreen', 'sweep_the_field', FakeCodec(),
+            1.0, gate=lambda: 'the robot is held')
+
+        with self.assertRaises(RequestRejected):
+            client.start({'field': 'north'})
+
+        assert not session.queries_for(SEND_GOAL)
+        assert client.goal_id is None
+
+    def test_an_open_gate_sends_the_goal(self):
+        session = accepting_session()
+        client = Ros2ActionClient(
+            FakeNode(), session, 'robogreen', 'sweep_the_field', FakeCodec(),
+            1.0, gate=lambda: None)
+
+        assert client.start({'field': 'north'}) == client.goal_id
 
 
 class TestObservingAGoal(unittest.TestCase):
@@ -404,6 +428,25 @@ class TestCancelling(unittest.TestCase):
         assert list(request.goal_info.goal_id.uuid) == goal_id
         assert request.goal_info.stamp.sec == 0
         assert request.goal_info.stamp.nanosec == 0
+
+    def test_the_cancel_tells_if_the_goal_was_already_over(self):
+        # A node on the robot canceled the goal before this cancel
+        session = accepting_session()
+        client, _ = start_goal(session)
+        session.replies[CANCEL_GOAL] = [FakeReply(
+            ok=ActionMsgs_CancelGoal_Response(
+                return_code=3, goals_canceling=[]).serialize())]
+
+        assert client.cancel()
+
+    def test_a_cancel_that_stops_the_goal_says_so(self):
+        session = accepting_session()
+        client, _ = start_goal(session)
+        session.replies[CANCEL_GOAL] = [FakeReply(
+            ok=ActionMsgs_CancelGoal_Response(
+                return_code=0, goals_canceling=[]).serialize())]
+
+        assert not client.cancel()
 
     def test_an_idle_client_has_nothing_to_cancel(self):
         session = FakeZenohSession()

@@ -15,14 +15,20 @@
 # limitations under the License.
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 import importlib
-from threading import RLock
+from threading import Lock, RLock
+import time
 from typing import Annotated, Callable
 
 from free_fleet.convert import transform_stamped_to_ros2_msg
 from free_fleet.ros2_types import (
+    GeometryMsgs_PoseStamped,
+    Header,
     SensorMsgs_BatteryState,
     StdMsgs_Empty,
+    StdSrvs_SetBool_Request,
+    StdSrvs_SetBool_Response,
     TFMessage,
     Time,
 )
@@ -53,6 +59,7 @@ from free_fleet_adapter.ros2_action_client import (
 )
 
 from geometry_msgs.msg import TransformStamped
+from pycdr2 import IdlStruct
 import rclpy
 import rmf_adapter.easy_full_control as rmf_easy
 from rmf_adapter.robot_update_handle import (
@@ -60,8 +67,23 @@ from rmf_adapter.robot_update_handle import (
     ActivityIdentifier,
     Tier
 )
+from std_srvs.srv import SetBool
 from tf_transformations import euler_from_quaternion
 import zenoh
+
+
+# CDR type matching nav2_evacuation_monitor/msg/EvacuationStatus of
+# nav2_zone_evacuation
+@dataclass
+class EvacuationStatus(IdlStruct):
+    header: Header
+    state: str
+    inside_zone: bool
+    evacuation_goal_in_progress: bool
+    active_zone_name: str
+    goal_pose: GeometryMsgs_PoseStamped
+    next_retry_time: Time
+    detail: str
 
 
 class Nav2TfHandler:
@@ -143,6 +165,9 @@ class RobotClaim(ABC):
         self.exec_handle = exec_handle
         self.stop_requested_sec: float | None = None
         self.stop_timeout_reported = False
+        # The evacuation monitor cancels all goals when it closes the gate.
+        # The client can report that cancel only after the evacuation.
+        self.gate_closed_by_monitor = False
 
     @property
     def activity(self) -> ActivityIdentifier | None:
@@ -173,10 +198,12 @@ class NavigationClaim(RobotClaim):
     ):
         super().__init__(subject, exec_handle)
         self.client = client
+        # A node on the robot canceled or ended the goal before this stop
+        self.goal_over_before_stop = False
 
     def request_stop(self):
         with self.exec_handle.mutex:
-            self.client.cancel()
+            self.goal_over_before_stop = self.client.cancel()
 
     def finish(self):
         """Report to RMF that the command this goal was carrying is over."""
@@ -202,9 +229,13 @@ class ActionClaim(RobotClaim):
 class PendingCommand:
     """A command waiting for the robot to be let go by whatever has it."""
 
-    def __init__(self, subject: str, start: Callable[[], None]):
+    def __init__(
+        self, subject: str, start: Callable[[], None], navigation: bool
+    ):
         self.subject = subject
         self.start = start
+        # RMF can plan a navigation again, but not an action
+        self.navigation = navigation
 
 
 class Nav2RobotAdapter(RobotAdapter):
@@ -213,6 +244,13 @@ class Nav2RobotAdapter(RobotAdapter):
     # How long an incoming command waits for the report that the robot
     # stopped before it is admitted without one, and an operator is told.
     DEFAULT_STOP_TIMEOUT_SEC = 10.0
+    # The gate is closed when the last evacuation monitor status is older
+    EVACUATION_STATUS_MAX_AGE_SEC = 3.0
+    # An issue is raised if no evacuation monitor status came in this time
+    EVACUATION_STATUS_FIRST_WAIT_SEC = 10.0
+    # After a goal that another node canceled, the time in which an
+    # evacuation monitor status can show that the monitor canceled it
+    CANCEL_DECISION_WINDOW_SEC = 2.0
 
     def __init__(
         self,
@@ -250,6 +288,9 @@ class Nav2RobotAdapter(RobotAdapter):
             'service_call_timeout_sec', self.DEFAULT_SERVICE_CALL_TIMEOUT_SEC)
         self.stop_timeout_sec = self.robot_config_yaml.get(
             'stop_timeout_sec', self.DEFAULT_STOP_TIMEOUT_SEC)
+        # Hold the goals during an evacuation of nav2_evacuation_monitor
+        self.use_evacuation_monitor = self.robot_config_yaml.get(
+            'use_evacuation_monitor', False)
 
         # TODO(ac): Only use full battery if sim is indicated
         self.battery_soc = 1.0
@@ -291,6 +332,47 @@ class Nav2RobotAdapter(RobotAdapter):
         )
 
         self._start_heartbeat()
+
+        # The gate holds the goals of the adapter and of the plugins. See
+        # _gate_reason.
+        self.gate_mutex = Lock()
+        self.evacuation_status: EvacuationStatus | None = None
+        self.evacuation_status_sec: float | None = None
+        # The monitor had its data (pose, zones) one time. After that,
+        # WAITING_FOR_DATA can hide a robot in a zone.
+        self.evacuation_monitor_had_data = False
+        self.start_sec = self._monotonic_sec()
+        self.cancel_window_end_sec: float | None = None
+        self.remote_hold = False
+        # Used only on the update thread
+        self.gate_closed = False
+        self.no_status_issue = None
+        self.monitor_issue = None
+        self.monitor_issue_state = None
+        # RMF waits for a navigation command that the gate stopped
+        self.replan_on_gate_open = False
+
+        def _evacuation_status_callback(sample: zenoh.Sample):
+            # Only the receive time is used: the robot can use sim time
+            try:
+                status = EvacuationStatus.deserialize(
+                    sample.payload.to_bytes())
+            except Exception as e:
+                self.node.get_logger().debug(
+                    f'Failed to deserialize evacuation status: {type(e)}: {e}'
+                )
+                return
+            with self.gate_mutex:
+                self.evacuation_status = status
+                self.evacuation_status_sec = self._monotonic_sec()
+                if status.state != 'WAITING_FOR_DATA':
+                    self.evacuation_monitor_had_data = True
+
+        if self.use_evacuation_monitor:
+            self.evacuation_status_sub = self.zenoh_session.declare_subscriber(
+                namespacify('evacuation_monitor/status', name),
+                _evacuation_status_callback
+            )
 
         # Initialize robot
         init_timeout_sec = self.robot_config_yaml.get('init_timeout_sec', 10)
@@ -349,6 +431,10 @@ class Nav2RobotAdapter(RobotAdapter):
                 'likely due to a configuration error.'
             self.node.get_logger().error(error_message)
             raise RuntimeError(error_message)
+
+        if self.use_evacuation_monitor:
+            self.hold_service = self.node.create_service(
+                SetBool, f'{self.name}/hold', self._hold_callback)
 
         if self.fleet_config is None:
             self.node.get_logger().info(
@@ -445,7 +531,8 @@ class Nav2RobotAdapter(RobotAdapter):
             self.name,
             action_name,
             codec,
-            self.service_call_timeout_sec
+            self.service_call_timeout_sec,
+            self._gate_reason
         )
         self.action_clients[action_name] = client
         return client
@@ -507,6 +594,8 @@ class Nav2RobotAdapter(RobotAdapter):
             case ActionClaim():
                 self._report_action_outcome(claim)
 
+        if self.use_evacuation_monitor:
+            self._update_gate()
         self._admit_pending_command()
 
         claim = self.claim
@@ -521,6 +610,10 @@ class Nav2RobotAdapter(RobotAdapter):
         RMF has already given the event its own terminal status, and finishing
         it here would stamp Completed over that. The action is told instead,
         and keeps the robot until it reports that the robot has stopped.
+
+        As after a navigation goal that another node canceled, a
+        CANCELED action that the adapter did not ask to stop keeps the gate
+        closed until the monitor status shows if the monitor canceled it.
         """
         execution = claim.exec_handle.execution
         if not execution.okay():
@@ -538,6 +631,11 @@ class Nav2RobotAdapter(RobotAdapter):
                 if current_action_state is not RobotActionState.CANCELED:
                     execution.finished()
                 self._release_claim(claim)
+                unrequested_cancel = (
+                    current_action_state is RobotActionState.CANCELED and
+                    not claim.stop_requested)
+                if unrequested_cancel and not claim.gate_closed_by_monitor:
+                    self._start_cancel_decision_window()
 
     def _report_navigation_outcome(self, claim: NavigationClaim):
         """
@@ -571,7 +669,11 @@ class Nav2RobotAdapter(RobotAdapter):
             )
             return
 
-        if claim.stop_requested:
+        canceled_on_robot = (
+            self.use_evacuation_monitor and
+            outcome.state is Ros2GoalState.CANCELED and
+            claim.goal_over_before_stop)
+        if claim.stop_requested and not canceled_on_robot:
             # RMF is not waiting on a command it has already taken back, and
             # finishing one would step a path RMF has replaced. All this goal
             # is still good for is the one thing being waited on: that it has
@@ -601,15 +703,26 @@ class Nav2RobotAdapter(RobotAdapter):
                     )
 
             case Ros2GoalState.CANCELED:
-                # The adapter did not ask for this cancel, so another node
+                # The adapter did not ask for this cancel, or the goal was
+                # canceled before the adapter asked. Thus another node
                 # canceled the goal and the robot did not arrive. RMF plans
-                # the command again, as after an abort.
+                # the command again, as after an abort. With the evacuation
+                # monitor, the replan waits for the gate: if the monitor did
+                # not close the gate while the goal ran, the gate stays
+                # closed until the monitor status shows if the monitor
+                # canceled it.
                 self._release_claim(claim)
                 self.node.get_logger().warn(
                     f'Robot [{self.name}]: another node canceled navigation '
                     f'goal {outcome.goal_id}'
                 )
-                self._trigger_replan()
+                if not self.use_evacuation_monitor:
+                    self._trigger_replan()
+                    return
+                self.replan_counts = 0
+                self.replan_on_gate_open = True
+                if not claim.gate_closed_by_monitor:
+                    self._start_cancel_decision_window()
 
             case _:
                 # No goal is running under this ID, so there is nothing this
@@ -618,6 +731,14 @@ class Nav2RobotAdapter(RobotAdapter):
                     f'Robot [{self.name}] has no navigation goal '
                     f'{outcome.goal_id} to report on'
                 )
+
+    def _start_cancel_decision_window(self):
+        """Close the gate until the monitor status shows who canceled."""
+        if not self.use_evacuation_monitor:
+            return
+        with self.gate_mutex:
+            self.cancel_window_end_sec = (
+                self._monotonic_sec() + self.CANCEL_DECISION_WINDOW_SEC)
 
     def navigate(
         self,
@@ -630,7 +751,8 @@ class Nav2RobotAdapter(RobotAdapter):
         )
         self._take_command(
             subject,
-            lambda: self._start_navigation(subject, destination, execution)
+            lambda: self._start_navigation(subject, destination, execution),
+            navigation=True
         )
 
     def _start_navigation(
@@ -722,7 +844,8 @@ class Nav2RobotAdapter(RobotAdapter):
         self._take_command(
             subject,
             lambda: self._start_action(
-                subject, action_factory, category, description, execution)
+                subject, action_factory, category, description, execution),
+            navigation=False
         )
 
     def _action_factory_for(self, category: str):
@@ -753,7 +876,9 @@ class Nav2RobotAdapter(RobotAdapter):
         exec_handle.set_action(robot_action)
         self.claim = ActionClaim(subject, exec_handle)
 
-    def _take_command(self, subject: str, start: Callable[[], None]):
+    def _take_command(
+        self, subject: str, start: Callable[[], None], navigation: bool
+    ):
         """
         Give the robot to a new command, once whatever has it lets go.
 
@@ -763,9 +888,10 @@ class Nav2RobotAdapter(RobotAdapter):
         is reported stopped - or until that wait runs out, in
         _admit_pending_command.
         """
+        gate_reason = self._gate_reason()
         with self.claim_mutex:
             claim = self.claim
-            if claim is None:
+            if claim is None and gate_reason is None:
                 self.pending_command = None
                 start()
                 return
@@ -777,7 +903,13 @@ class Nav2RobotAdapter(RobotAdapter):
                     f'{superseded.subject} was still waiting for the robot; '
                     'only the newer one will be carried out'
                 )
-            self.pending_command = PendingCommand(subject, start)
+            self.pending_command = PendingCommand(subject, start, navigation)
+            if claim is None:
+                self.node.get_logger().info(
+                    f'Robot [{self.name}] was given {subject}. It waits, '
+                    f'because {gate_reason}'
+                )
+                return
             self.node.get_logger().info(
                 f'Robot [{self.name}] was given {subject} while '
                 f'{claim.subject} still has it, so that is being asked to stop'
@@ -835,6 +967,11 @@ class Nav2RobotAdapter(RobotAdapter):
                     self._raise_stop_timeout_issue(claim, admitted=None)
                 return
 
+            if self._gate_reason() is not None:
+                if claim is not None:
+                    self._raise_stop_timeout_issue(claim, admitted=None)
+                return
+
             self.pending_command = None
             if claim is not None:
                 self._raise_stop_timeout_issue(claim, admitted=pending)
@@ -864,7 +1001,7 @@ class Nav2RobotAdapter(RobotAdapter):
         )
         if admitted is None:
             message += (
-                'and nothing is waiting for the robot, so it is still held. '
+                'and no command was admitted, so it is still held. '
                 'The robot may still be moving under a command that has '
                 'stopped answering.'
             )
@@ -889,6 +1026,177 @@ class Nav2RobotAdapter(RobotAdapter):
             )
         ))
 
+    def _gate_reason(self) -> str | None:
+        """
+        Return why the robot may get no new goal now, or None.
+
+        The gate holds the goals of the adapter and of the plugins while the
+        evacuation monitor on the robot moves the robot out of a zone, and
+        while the robot is held. A goal that is running is not stopped.
+        Without use_evacuation_monitor, the gate is always open.
+        """
+        if not self.use_evacuation_monitor:
+            return None
+        with self.gate_mutex:
+            status = self.evacuation_status
+            status_sec = self.evacuation_status_sec
+            if self.remote_hold:
+                return 'the robot is held (hold service)'
+            if self.cancel_window_end_sec is not None:
+                return 'another node canceled a goal'
+            had_data = self.evacuation_monitor_had_data
+        if status is None:
+            return None
+        if (self._monotonic_sec() - status_sec >
+                self.EVACUATION_STATUS_MAX_AGE_SEC):
+            return 'the evacuation monitor status is too old'
+        if status.state == 'WAITING_FOR_DATA' and had_data:
+            return 'the evacuation monitor has no robot pose or zone data'
+        return self._monitor_reason(status)
+
+    @staticmethod
+    def _monitor_reason(status: EvacuationStatus) -> str | None:
+        """Return why this evacuation monitor status closes the gate."""
+        if status.state in ('HOLD', 'FAILED'):
+            return f'the evacuation monitor state is {status.state}'
+        if status.inside_zone:
+            return f'the robot is in zone [{status.active_zone_name}]'
+        if status.evacuation_goal_in_progress:
+            return 'the evacuation exit goal is in progress'
+        return None
+
+    def _update_gate(self):
+        """
+        End the decision window of a cancel, and replan when the gate opens.
+
+        RMF planned a pending navigation from where the robot was before the
+        gate closed, so it is dropped and RMF plans again. A pending action
+        is kept, because RMF does not plan it again.
+        """
+        now = self._monotonic_sec()
+        with self.gate_mutex:
+            status = self.evacuation_status
+            status_sec = self.evacuation_status_sec
+            fresh = status is not None and (
+                now - self.evacuation_status_sec <=
+                self.EVACUATION_STATUS_MAX_AGE_SEC)
+            monitor_reason = self._monitor_reason(status) if fresh else None
+            claim = self.claim
+            if monitor_reason is not None and claim is not None:
+                claim.gate_closed_by_monitor = True
+            if self.cancel_window_end_sec is not None and (
+                    monitor_reason is not None or
+                    now >= self.cancel_window_end_sec):
+                self.cancel_window_end_sec = None
+
+        self._update_monitor_issues(status, status_sec, now)
+
+        reason = self._gate_reason()
+        if reason is not None and not self.gate_closed:
+            self.node.get_logger().warn(
+                f'Robot [{self.name}] gets no new goal, because {reason}')
+        elif reason is None and self.gate_closed:
+            self.node.get_logger().info(
+                f'Robot [{self.name}] can get new goals again')
+            with self.claim_mutex:
+                pending = self.pending_command
+                if pending is not None and pending.navigation:
+                    self.pending_command = None
+                    self.replan_on_gate_open = True
+        if reason is None and self.replan_on_gate_open:
+            # Not limited by MAX_REPLAN_COUNTS: without this replan, RMF
+            # waits for the navigation for ever
+            self.replan_on_gate_open = False
+            self.replan_counts = 0
+            self._trigger_replan()
+        self.gate_closed = reason is not None
+
+    def _update_monitor_issues(
+        self, status: EvacuationStatus | None, status_sec, now
+    ):
+        """Keep one issue for a missing status, and one for HOLD or FAILED."""
+        last_sec = self.start_sec if status is None else status_sec
+        if (self.no_status_issue is None and now - last_sec >
+                self.EVACUATION_STATUS_FIRST_WAIT_SEC):
+            message = (
+                f'No evacuation monitor status from robot [{self.name}] '
+                f'in {self.EVACUATION_STATUS_FIRST_WAIT_SEC}s. Before the '
+                'first status, RMF can send goals during an evacuation. '
+                'After it, the robot gets no new goal.'
+            )
+            self.node.get_logger().error(message)
+            self.no_status_issue = self.update_handle.more().create_issue(
+                Tier.Error, 'evacuation_monitor_status_missing',
+                {'message': message})
+        elif (self.no_status_issue is not None and
+                now - last_sec <= self.EVACUATION_STATUS_MAX_AGE_SEC):
+            self.no_status_issue.resolve({})
+            self.no_status_issue = None
+        if status is None:
+            return
+
+        state = status.state if status.state in ('HOLD', 'FAILED') else None
+        if self.monitor_issue is not None and state != self.monitor_issue_state:
+            self.monitor_issue.resolve({})
+            self.monitor_issue = None
+        if state is not None and self.monitor_issue is None:
+            self.monitor_issue_state = state
+            self.monitor_issue = self.update_handle.more().create_issue(
+                Tier.Error, 'evacuation_monitor',
+                {'state': state, 'zone': status.active_zone_name,
+                 'message': status.detail})
+
+    def _hold_callback(self, request, response):
+        """
+        Hold or release the robot: the adapter gate and the monitor.
+
+        A hold closes the gate and stops the goal of the adapter, also if the
+        monitor does not answer. During a task action, it cancels the goals of
+        the action, and the action fails, as after a cancel by the monitor. A
+        release clears the hold and the decision window of the adapter, also
+        if the monitor does not answer. Then a monitor that
+        is still in HOLD, or a status that is too old, keeps the gate closed.
+        """
+        with self.gate_mutex:
+            self.remote_hold = request.data
+            if not request.data:
+                self.cancel_window_end_sec = None
+        claim = self.claim
+        if request.data and isinstance(claim, NavigationClaim):
+            if not claim.stop_requested:
+                # RMF waits for this navigation
+                self.replan_on_gate_open = True
+            self._request_stop(claim)
+        elif request.data and claim is not None:
+            # stop_action() ends the action CANCELED, and RMF then waits for
+            # ever. A canceled goal makes the action fail and end its task.
+            for client in list(self.action_clients.values()):
+                client.cancel()
+        response.success, response.message = self._forward_hold(request.data)
+        self.node.get_logger().info(
+            f'Robot [{self.name}] hold {request.data}: '
+            f'success {response.success}, {response.message}'
+        )
+        return response
+
+    def _forward_hold(self, hold: bool) -> tuple[bool, str]:
+        """Call the hold service of the evacuation monitor on the robot."""
+        request = StdSrvs_SetBool_Request(data=hold)
+        for reply in self.zenoh_session.get(
+            namespacify('evacuation_monitor/hold', self.name),
+            payload=request.serialize(),
+            timeout=self.service_call_timeout_sec
+        ):
+            if reply.ok is None:
+                return False, 'the evacuation monitor hold call failed'
+            try:
+                answer = StdSrvs_SetBool_Response.deserialize(
+                    reply.ok.payload.to_bytes())
+            except Exception as e:
+                return False, f'the evacuation monitor reply: {type(e)}: {e}'
+            return answer.success, f'evacuation monitor: {answer.message}'
+        return False, 'the evacuation monitor did not answer'
+
     def _start_heartbeat(self):
         """
         Publish std_msgs/Empty on heartbeat_topic every heartbeat_period_sec.
@@ -906,6 +1214,9 @@ class Nav2RobotAdapter(RobotAdapter):
         self.heartbeat_timer = self.node.create_timer(
             self.robot_config_yaml.get('heartbeat_period_sec', 1.0),
             lambda: self.heartbeat_pub.put(payload))
+
+    def _monotonic_sec(self) -> float:
+        return time.monotonic()
 
     def _now_sec(self) -> float:
         seconds, nanoseconds = \

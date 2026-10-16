@@ -17,6 +17,7 @@
 from abc import ABC, abstractmethod
 from enum import StrEnum
 from threading import Lock
+from typing import Callable
 
 from free_fleet.ros2_types import (
     ActionMsgs_CancelGoal_Request,
@@ -65,6 +66,9 @@ TERMINAL_GOAL_STATES = frozenset({
     Ros2GoalState.CANCELED,
     Ros2GoalState.ABORTED,
 })
+
+# action_msgs/srv/CancelGoal: the goal was already canceling or had ended
+CANCEL_ERROR_GOAL_TERMINATED = 3
 
 GOAL_STATUS_STATES = {
     GoalStatus.STATUS_ACCEPTED.value: Ros2GoalState.EXECUTING,
@@ -170,6 +174,9 @@ class Ros2ActionClient:
 
     A client is bound to its endpoint for life rather than to a single goal, so
     its feedback subscription is declared once and successive goals reuse it.
+
+    If a gate is given, start() first calls it. The gate returns why no goal
+    may start now, or None.
     """
 
     def __init__(
@@ -180,6 +187,7 @@ class Ros2ActionClient:
         action_name: str,
         codec: Ros2ActionCodec,
         service_call_timeout_sec: float,
+        gate: Callable[[], str | None] | None = None,
     ):
         self.node = node
         self.zenoh_session = zenoh_session
@@ -187,6 +195,7 @@ class Ros2ActionClient:
         self.action_name = action_name
         self.codec = codec
         self.service_call_timeout_sec = service_call_timeout_sec
+        self.gate = gate
 
         self._mutex = Lock()
         self._goal_id = None
@@ -225,7 +234,15 @@ class Ros2ActionClient:
         of them is ever read as an acceptance. Only an explicit refusal proves
         nothing is running, so only that case forgets the goal; after the other
         two the caller still holds a goal it can cancel.
+
+        A closed gate raises RequestRejected before a goal ID is recorded or a
+        request is sent.
         """
+        reason = None if self.gate is None else self.gate()
+        if reason is not None:
+            raise RequestRejected(
+                f'{self.action_name} goal was not sent: {reason}')
+
         goal_id = self._generate_goal_id()
         request = self.codec.make_send_goal_request(goal_id, goal)
 
@@ -303,7 +320,7 @@ class Ros2ActionClient:
 
         return outcome
 
-    def cancel(self):
+    def cancel(self) -> bool:
         """
         Ask the endpoint to cancel the goal this client last started.
 
@@ -313,11 +330,14 @@ class Ros2ActionClient:
 
         The goal is not forgotten: its outcome still comes from the endpoint, so
         a cancellation is only reported once the endpoint confirms it.
+
+        Return True if the endpoint answers that the goal was already
+        canceling or had ended. Then this request did not stop the goal.
         """
         with self._mutex:
             goal_id = self._goal_id
             if goal_id is None:
-                return
+                return False
             # Drop the estimate so the next observation asks straight away
             self._feedback = None
 
@@ -327,6 +347,7 @@ class Ros2ActionClient:
                 Time(sec=0, nanosec=0)
             )
         )
+        goal_was_over = False
         for reply in self.zenoh_session.get(
             self._endpoint('cancel_goal'),
             payload=request.serialize(),
@@ -351,6 +372,9 @@ class Ros2ActionClient:
                 f'{self.action_name} cancel return code: '
                 f'{response.return_code}'
             )
+            if response.return_code == CANCEL_ERROR_GOAL_TERMINATED:
+                goal_was_over = True
+        return goal_was_over
 
     def _endpoint(self, service: str) -> str:
         return namespacify(
