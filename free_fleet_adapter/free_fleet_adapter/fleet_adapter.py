@@ -125,6 +125,16 @@ def start_fleet_adapter(
         zenoh_session=zenoh_session,
         node=node,
     )
+    # Set up zone sync (RMF LEAVE_NOW zones -> Nav2 robot zones)
+    zone_sync = None
+    if config_yaml.get('nav2_zone_sync', False):
+        # Only the zone sync needs rmf_zone_manager_msgs
+        from free_fleet_adapter.nav2_zone_sync import Nav2ZoneSync
+        zone_sync = Nav2ZoneSync(
+            zenoh_session=zenoh_session,
+            node=node,
+            fleet_name=fleet_name,
+        )
 
     def lane_request_cb(msg: LaneRequest):
         if msg.fleet_name and msg.fleet_name != fleet_name:
@@ -199,6 +209,9 @@ def start_fleet_adapter(
                 tf_buffer
             )
             route_sync.add_robot(robot_name)
+            if zone_sync is not None:
+                zone_sync.add_robot(
+                    robot_name, robots[robot_name].update_handle)
         elif nav_stack == 1:
             robots[robot_name] = Nav1RobotAdapter(
                 robot_name,
@@ -214,6 +227,9 @@ def start_fleet_adapter(
                 'Navigation stack can only be 1 (experimental) or 2'
             node.get_logger().error(error_message)
             raise RuntimeError(error_message)
+
+    if zone_sync is not None:
+        zone_sync.start()
 
     update_period = 1.0/config_yaml['rmf_fleet'].get(
         'robot_state_update_frequency', 10.0
