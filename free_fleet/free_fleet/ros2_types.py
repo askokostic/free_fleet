@@ -248,3 +248,10 @@ class SensorMsgs_BatteryState(IdlStruct):
     cell_temperature: pycdr2.types.sequence[pycdr2.types.float32]
     location: str
     serial_number: str
+
+
+# https://github.com/ros2/common_interfaces/blob/rolling/std_msgs/msg/Empty.msg
+@dataclass
+class StdMsgs_Empty(IdlStruct):
+    # rosidl adds this member to an empty message
+    structure_needs_at_least_one_member: pycdr2.types.uint8 = 0

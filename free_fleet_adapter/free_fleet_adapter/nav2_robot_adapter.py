@@ -22,6 +22,7 @@ from typing import Annotated, Callable
 from free_fleet.convert import transform_stamped_to_ros2_msg
 from free_fleet.ros2_types import (
     SensorMsgs_BatteryState,
+    StdMsgs_Empty,
     TFMessage,
     Time,
 )
@@ -288,6 +289,8 @@ class Nav2RobotAdapter(RobotAdapter):
             namespacify('battery_state', name),
             _battery_state_callback
         )
+
+        self._start_heartbeat()
 
         # Initialize robot
         init_timeout_sec = self.robot_config_yaml.get('init_timeout_sec', 10)
@@ -885,6 +888,24 @@ class Nav2RobotAdapter(RobotAdapter):
                 }
             )
         ))
+
+    def _start_heartbeat(self):
+        """
+        Publish std_msgs/Empty on heartbeat_topic every heartbeat_period_sec.
+
+        A node on the robot can watch this topic to find a lost link to the
+        adapter, for example nav2_zone_manager with link_timeout. Without
+        heartbeat_topic, there is no heartbeat.
+        """
+        topic = self.robot_config_yaml.get('heartbeat_topic', '')
+        if not topic:
+            return
+        self.heartbeat_pub = self.zenoh_session.declare_publisher(
+            namespacify(topic, self.name))
+        payload = StdMsgs_Empty().serialize()
+        self.heartbeat_timer = self.node.create_timer(
+            self.robot_config_yaml.get('heartbeat_period_sec', 1.0),
+            lambda: self.heartbeat_pub.put(payload))
 
     def _now_sec(self) -> float:
         seconds, nanoseconds = \

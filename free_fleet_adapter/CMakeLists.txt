@@ -27,6 +27,7 @@ if(BUILD_TESTING)
     tests/test_action_outcome_reporting.py
     tests/test_copyright.py
     tests/test_flake8.py
+    tests/test_heartbeat.py
     tests/test_nav2_action_codecs.py
     tests/test_navigation_outcome_reporting.py
     tests/test_one_commander.py
