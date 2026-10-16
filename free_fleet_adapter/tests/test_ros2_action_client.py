@@ -18,7 +18,10 @@ import ast
 import json
 import unittest
 
-from free_fleet.ros2_types import GoalStatus
+from free_fleet.ros2_types import (
+    ActionMsgs_CancelGoal_Request,
+    GoalStatus,
+)
 
 import free_fleet_adapter.ros2_action_client as ros2_action_client
 from free_fleet_adapter.ros2_action_client import (
@@ -386,6 +389,21 @@ class TestCancelling(unittest.TestCase):
         client.cancel()
 
         assert session.queries_for(CANCEL_GOAL)
+
+    def test_the_cancel_names_only_the_goal_of_this_client(self):
+        # A zero goal ID would cancel every goal of the endpoint, also the
+        # goal of another node on the robot
+        session = accepting_session()
+        client, goal_id = start_goal(session)
+
+        client.cancel()
+
+        _, payload = [query for query in session.queries
+                      if query[0].endswith(CANCEL_GOAL)][0]
+        request = ActionMsgs_CancelGoal_Request.deserialize(payload)
+        assert list(request.goal_info.goal_id.uuid) == goal_id
+        assert request.goal_info.stamp.sec == 0
+        assert request.goal_info.stamp.nanosec == 0
 
     def test_an_idle_client_has_nothing_to_cancel(self):
         session = FakeZenohSession()

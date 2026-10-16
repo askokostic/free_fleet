@@ -784,11 +784,8 @@ class Nav2RobotAdapter(RobotAdapter):
         here, so a holder that never reports cannot keep the robot forever.
 
         The cancel is made under the same lock that decides who holds the
-        robot, and not after it. A client cancels every goal its endpoint is
-        running, so a cancel that outlived its claim would stop whichever goal
-        had been admitted in the meantime - and that goal's command, reported
-        cancelled by a claim nobody had asked to stop, would be handed back to
-        RMF as a robot that had arrived.
+        robot, and not after it, so that a cancel never outlives its claim and
+        cancels a goal that the claim no longer owns.
         """
         with self.claim_mutex:
             if claim.stop_requested or self.claim is not claim:

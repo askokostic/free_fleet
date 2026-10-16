@@ -19,13 +19,14 @@ from enum import StrEnum
 from threading import Lock
 
 from free_fleet.ros2_types import (
+    ActionMsgs_CancelGoal_Request,
     ActionMsgs_CancelGoal_Response,
+    ActionMsgs_GoalInfo,
     GoalStatus,
+    Time,
+    UUID,
 )
-from free_fleet.utils import (
-    make_nav2_cancel_all_goals_request,
-    namespacify,
-)
+from free_fleet.utils import namespacify
 import numpy as np
 import zenoh
 
@@ -304,18 +305,28 @@ class Ros2ActionClient:
 
     def cancel(self):
         """
-        Ask the endpoint to cancel every goal it is running for this robot.
+        Ask the endpoint to cancel the goal this client last started.
+
+        The request has the goal ID and a zero stamp, so the endpoint cancels
+        only that goal (action_msgs/srv/CancelGoal). A goal that another node
+        sent to the same endpoint keeps running.
 
         The goal is not forgotten: its outcome still comes from the endpoint, so
         a cancellation is only reported once the endpoint confirms it.
         """
         with self._mutex:
-            if self._goal_id is None:
+            goal_id = self._goal_id
+            if goal_id is None:
                 return
             # Drop the estimate so the next observation asks straight away
             self._feedback = None
 
-        request = make_nav2_cancel_all_goals_request()
+        request = ActionMsgs_CancelGoal_Request(
+            goal_info=ActionMsgs_GoalInfo(
+                UUID(uuid=list(goal_id)),
+                Time(sec=0, nanosec=0)
+            )
+        )
         for reply in self.zenoh_session.get(
             self._endpoint('cancel_goal'),
             payload=request.serialize(),
