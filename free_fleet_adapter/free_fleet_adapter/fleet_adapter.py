@@ -29,11 +29,11 @@ from rclpy.duration import Duration
 from rclpy.experimental import EventsExecutor
 import rclpy.node
 from rclpy.parameter import Parameter
-from rmf_fleet_msgs.msg import LaneRequest
 import rmf_adapter
 from rmf_adapter import Adapter, Transformation
 import rmf_adapter.easy_full_control as rmf_easy
 import rmf_adapter.fleet_update_handle as rmf_fleet
+from rmf_fleet_msgs.msg import LaneRequest
 from tf2_ros import Buffer
 import yaml
 import zenoh

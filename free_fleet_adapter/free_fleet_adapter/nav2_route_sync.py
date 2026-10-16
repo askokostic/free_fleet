@@ -44,7 +44,8 @@ class DynamicEdges_Response(IdlStruct):
 
 
 class Nav2RouteSync:
-    """Synchronizes RMF lane closures to Nav2 route servers.
+    """
+    Synchronizes RMF lane closures to Nav2 route servers.
 
     Sends DynamicEdges service requests over Zenoh to each robot's
     DynamicEdgesScorer plugin.
